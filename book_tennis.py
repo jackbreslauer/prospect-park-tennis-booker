@@ -7,12 +7,9 @@ Runs at midnight, books a 1-hour court 7 days out for Mon–Thu, 6–8 PM.
 import asyncio
 import json
 import logging
-import os
-import smtplib
+import subprocess
 import sys
 from datetime import datetime, timedelta
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -21,10 +18,6 @@ from playwright.async_api import async_playwright
 TENNIS_EMAIL    = "jabreslauer@gmail.com"
 TENNIS_PASSWORD = "Hornets1!"
 BOOKING_URL     = "https://prospectpark.aptussoft.com/Member"
-
-NOTIFY_EMAIL    = "jabreslauer@gmail.com"
-GMAIL_USER      = "jabreslauer@gmail.com"
-GMAIL_APP_PASS  = os.environ.get("GMAIL_APP_PASS", "")   # set in .env / launchd env
 
 TARGET_DAYS_AHEAD = 7
 BOOK_DAYS     = {0, 1, 2, 3}       # Mon=0 Tue=1 Wed=2 Thu=3
@@ -48,23 +41,20 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Email helper ───────────────────────────────────────────────────────────────
-def send_email(subject: str, body: str):
-    if not GMAIL_APP_PASS:
-        log.warning("GMAIL_APP_PASS not set – skipping email notification.")
-        return
+# ── macOS notification helper ──────────────────────────────────────────────────
+def notify(title: str, message: str):
+    """Show a macOS notification banner. Works even when screen is locked –
+    it will appear the next time the screen is woken."""
+    script = (
+        f'display notification "{message}" '
+        f'with title "{title}" '
+        f'sound name "Glass"'
+    )
     try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"]    = GMAIL_USER
-        msg["To"]      = NOTIFY_EMAIL
-        msg.attach(MIMEText(body, "plain"))
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as smtp:
-            smtp.login(GMAIL_USER, GMAIL_APP_PASS)
-            smtp.sendmail(GMAIL_USER, NOTIFY_EMAIL, msg.as_string())
-        log.info("Email sent: %s", subject)
+        subprocess.run(["osascript", "-e", script], check=True, timeout=10)
+        log.info("Notification sent: %s", title)
     except Exception as e:
-        log.error("Email failed: %s", e)
+        log.error("Notification failed: %s", e)
 
 # ── Core booking logic ─────────────────────────────────────────────────────────
 async def check_availability(page, target_date_str: str) -> list[dict]:
@@ -357,38 +347,24 @@ async def run():
                     }""")
                     await page.wait_for_timeout(1000)
 
-            # ── Send result email ──────────────────────────────────────────────
+            # ── Notify result ──────────────────────────────────────────────────
             if booked:
-                subject = f"✅ Tennis court booked: {booked_info['day']} {booked_info['date']} {booked_info['stime']}–{booked_info['etime']}"
-                body    = (
-                    f"Your court has been booked!\n\n"
-                    f"  Date:   {booked_info['day']}, {booked_info['date']}\n"
-                    f"  Time:   {booked_info['stime']} – {booked_info['etime']}\n"
-                    f"  Court:  {booked_info['court']}\n"
-                    f"  Venue:  Prospect Park Tennis Center\n\n"
-                    f"Check 'My Reservations' on the portal to confirm.\n"
-                    f"https://prospectpark.aptussoft.com/Member\n"
-                )
-                log.info(subject)
-                send_email(subject, body)
+                title = "🎾 Court booked!"
+                msg   = (f"{booked_info['day']} {booked_info['date']} · "
+                         f"{booked_info['stime']}–{booked_info['etime']} · "
+                         f"{booked_info['court']}")
+                log.info("%s – %s", title, msg)
+                notify(title, msg)
             else:
-                subject = f"❌ Tennis booking FAILED: {day_name} {date_str}"
-                body    = (
-                    f"The auto-booker could not secure a court for {day_name}, {date_str}.\n\n"
-                    f"Slots tried: {', '.join(f'{s}–{e}' for s,e in TIME_SLOTS)}\n"
-                    f"All courts may already be reserved, or an error occurred.\n\n"
-                    f"Check manually: https://prospectpark.aptussoft.com/Member\n"
-                    f"Log file: {LOG_FILE}\n"
-                )
-                log.warning(subject)
-                send_email(subject, body)
+                title = "❌ Tennis booking failed"
+                msg   = (f"No court secured for {day_name} {date_str}. "
+                         f"All courts may be taken. Check the portal manually.")
+                log.warning("%s – %s", title, msg)
+                notify(title, msg)
 
         except Exception as e:
             log.exception("Unexpected error: %s", e)
-            send_email(
-                f"❌ Tennis booker error: {e}",
-                f"An unexpected error occurred:\n\n{e}\n\nLog: {LOG_FILE}"
-            )
+            notify("❌ Tennis booker error", str(e)[:100])
         finally:
             await browser.close()
 
