@@ -263,18 +263,27 @@ async def run():
         page    = await browser.new_page(viewport={"width": 1280, "height": 900})
 
         try:
-            # ── Login ──────────────────────────────────────────────────────────
+            # ── Login (with retry) ─────────────────────────────────────────────
             log.info("Logging in…")
-            await page.goto(BOOKING_URL, wait_until="networkidle")
-            await page.fill('input[name="email"]', TENNIS_EMAIL)
-            await page.fill('input[name="password"]', TENNIS_PASSWORD)
-            await page.click('button:has-text("Sign In")')
-            await page.wait_for_load_state("networkidle", timeout=30000)
-            await page.wait_for_timeout(2000)
+            logged_in = False
+            for attempt in range(1, 4):
+                try:
+                    await page.goto(BOOKING_URL, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_selector('input[name="email"]', timeout=15000)
+                    await page.fill('input[name="email"]', TENNIS_EMAIL)
+                    await page.fill('input[name="password"]', TENNIS_PASSWORD)
+                    await page.click('button:has-text("Sign In")')
+                    await page.wait_for_url("**/Main", timeout=20000)
+                    logged_in = True
+                    break
+                except Exception as e:
+                    log.warning("Login attempt %d failed: %s", attempt, e)
+                    await page.wait_for_timeout(3000)
 
-            if "Main" not in page.url:
-                raise RuntimeError(f"Login failed – still at {page.url}")
+            if not logged_in:
+                raise RuntimeError("All login attempts failed")
             log.info("Logged in. URL: %s", page.url)
+            await page.wait_for_load_state("domcontentloaded")
 
             # ── Open Court Reservation ─────────────────────────────────────────
             log.info("Opening Court Reservation…")
